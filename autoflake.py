@@ -197,110 +197,21 @@ def multiline_statement(line, previous_line=''):
     except (SyntaxError, tokenize.TokenError):
         return True
 
-
-def break_up_import(line):
-    """Return line with imports on separate lines."""
-    assert '\\' not in line
-    assert '(' not in line
-    assert ')' not in line
-    assert ';' not in line
-    assert '#' not in line
-
-    newline = get_line_ending(line)
-    if not newline:
-        return line
-
-    (indentation, imports) = re.split(pattern=r'\bimport\b',
-                                      string=line, maxsplit=1)
-
-    indentation += 'import '
-    assert newline
-
-    return ''.join([indentation + i.strip() + newline
-                    for i in sorted(imports.split(','))])
-
-
-def filter_code(source, additional_imports=None,
-                remove_all_unused_imports=False,
-                remove_unused_variables=False):
-    """Yield code with unused imports removed."""
-    imports = SAFE_IMPORTS
-    if additional_imports:
-        imports |= frozenset(additional_imports)
-    del additional_imports
-
-    messages = check(source)
-
-    marked_import_line_numbers = frozenset(
-        unused_import_line_numbers(messages))
-
-    if remove_unused_variables:
-        marked_variable_line_numbers = frozenset(
-            unused_variable_line_numbers(messages))
+def get_line_ending(line):
+    """Return line ending."""
+    non_whitespace_index = len(line.rstrip()) - len(line)
+    if not non_whitespace_index:
+        return ''
     else:
-        marked_variable_line_numbers = {}
+        return line[non_whitespace_index:]
 
-    sio = io.StringIO(source)
-    previous_line = ''
-    for line_number, line in enumerate(sio.readlines(), start=1):
-        if '#' in line:
-            yield line
-        elif line_number in marked_import_line_numbers:
-            yield filter_unused_import(
-                line,
-                remove_all_unused_imports=remove_all_unused_imports,
-                imports=imports,
-                previous_line=previous_line)
-        elif line_number in marked_variable_line_numbers:
-            yield filter_unused_variable(line)
-        else:
-            yield line
-
-        previous_line = line
-
-
-def filter_unused_import(line, remove_all_unused_imports, imports,
-                         previous_line=''):
-    """Return line if used, otherwise return None."""
-    if multiline_import(line, previous_line):
-        return line
-    elif ',' in line:
-        return break_up_import(line)
+def get_indentation(line):
+    """Return leading whitespace."""
+    if line.strip():
+        non_whitespace_index = len(line) - len(line.lstrip())
+        return line[:non_whitespace_index]
     else:
-        package = extract_package_name(line)
-        if not remove_all_unused_imports and package not in imports:
-            return line
-        else:
-            # We need to replace import with "pass" in case the import is the
-            # only line inside a block. For example,
-            # "if True:\n    import os". In such cases, if the import is
-            # removed, the block will be left hanging with no body.
-            return (get_indentation(line) +
-                    'pass' +
-                    get_line_ending(line))
-
-
-def filter_unused_variable(line, previous_line=''):
-    """Return line if used, otherwise return None."""
-    if re.match(EXCEPT_REGEX, line):
-        return re.sub(r' as \w+:$', ':', line, count=1)
-    elif multiline_statement(line, previous_line):
-        return line
-    elif line.count('=') == 1:
-        split_line = line.split('=')
-        assert len(split_line) == 2
-        value = split_line[1].lstrip()
-        if ',' in split_line[0]:
-            return line
-
-        if is_literal_or_name(value):
-            # Replace with "pass" to avoid possible hanging block with no body.
-            value = 'pass' + get_line_ending(line)
-
-        return get_indentation(line) + value
-    else:
-        return line
-
+        return ''
 
 def is_literal_or_name(value):
     """Return True if value is a literal or a name."""
@@ -316,127 +227,6 @@ def is_literal_or_name(value):
     # Support removal of variables on the right side. But make sure
     # there are no dots, which could mean an access of a property.
     return re.match(r'^\w+\s*$', value)
-
-
-def useless_pass_line_numbers(source):
-    """Yield line numbers of unneeded "pass" statements."""
-    sio = io.StringIO(source)
-    previous_token_type = None
-    last_pass_row = None
-    last_pass_indentation = None
-    previous_line = ''
-    for token in tokenize.generate_tokens(sio.readline):
-        token_type = token[0]
-        start_row = token[2][0]
-        line = token[4]
-
-        is_pass = (token_type == tokenize.NAME and line.strip() == 'pass')
-
-        # Leading "pass".
-        if (start_row - 1 == last_pass_row and
-                get_indentation(line) == last_pass_indentation and
-                token_type in ATOMS and
-                not is_pass):
-            yield start_row - 1
-
-        if is_pass:
-            last_pass_row = start_row
-            last_pass_indentation = get_indentation(line)
-
-        # Trailing "pass".
-        if (is_pass and
-                previous_token_type != tokenize.INDENT and
-                not previous_line.rstrip().endswith('\\')):
-            yield start_row
-
-        previous_token_type = token_type
-        previous_line = line
-
-
-def filter_useless_pass(source):
-    """Yield code with useless "pass" lines removed."""
-    try:
-        marked_lines = frozenset(useless_pass_line_numbers(source))
-    except (SyntaxError, tokenize.TokenError):
-        marked_lines = frozenset()
-
-    sio = io.StringIO(source)
-    for line_number, line in enumerate(sio.readlines(), start=1):
-        if line_number not in marked_lines:
-            yield line
-
-
-def get_indentation(line):
-    """Return leading whitespace."""
-    if line.strip():
-        non_whitespace_index = len(line) - len(line.lstrip())
-        return line[:non_whitespace_index]
-    else:
-        return ''
-
-
-def get_line_ending(line):
-    """Return line ending."""
-    non_whitespace_index = len(line.rstrip()) - len(line)
-    if not non_whitespace_index:
-        return ''
-    else:
-        return line[non_whitespace_index:]
-
-
-def fix_code(source, additional_imports=None, remove_all_unused_imports=False,
-             remove_unused_variables=False):
-    """Return code with all filtering run on it."""
-    if not source:
-        return source
-
-    # pyflakes does not handle "nonlocal" correctly.
-    if 'nonlocal' in source:
-        remove_unused_variables = False
-
-    filtered_source = None
-    while True:
-        filtered_source = ''.join(
-            filter_useless_pass(''.join(
-                filter_code(
-                    source,
-                    additional_imports=additional_imports,
-                    remove_all_unused_imports=remove_all_unused_imports,
-                    remove_unused_variables=remove_unused_variables))))
-
-        if filtered_source == source:
-            break
-        source = filtered_source
-
-    return filtered_source
-
-
-def fix_file(filename, args, standard_out):
-    """Run fix_code() on a file."""
-    encoding = detect_encoding(filename)
-    with open_with_encoding(filename, encoding=encoding) as input_file:
-        source = input_file.read()
-
-    original_source = source
-
-    filtered_source = fix_code(
-        source,
-        additional_imports=args.imports.split(',') if args.imports else None,
-        remove_all_unused_imports=args.remove_all_unused_imports,
-        remove_unused_variables=args.remove_unused_variables)
-
-    if original_source != filtered_source:
-        if args.in_place:
-            with open_with_encoding(filename, mode='w',
-                                    encoding=encoding) as output_file:
-                output_file.write(filtered_source)
-        else:
-            diff = get_diff_text(
-                io.StringIO(original_source).readlines(),
-                io.StringIO(filtered_source).readlines(),
-                filename)
-            standard_out.write(''.join(diff))
-
 
 def open_with_encoding(filename, encoding, mode='r'):
     """Return opened file with a specific encoding."""
@@ -489,6 +279,216 @@ def get_diff_text(old, new, filename):
     return text
 
 
+class AutoFlake(object):
+
+    def __init__(self, additional_imports=None, remove_all_unused_imports=False,
+                 remove_unused_variables=False):
+
+        self.imports = SAFE_IMPORTS
+
+        if additional_imports:
+            self.imports |= frozenset(additional_imports)
+
+        self.additional_imports = additional_imports
+        self.remove_unused_variables = remove_unused_variables
+        self.remove_all_unused_imports = remove_all_unused_imports
+
+    def break_up_import(self, line):
+        """Return line with imports on separate lines."""
+        assert '\\' not in line
+        assert '(' not in line
+        assert ')' not in line
+        assert ';' not in line
+        assert '#' not in line
+
+        newline = get_line_ending(line)
+        if not newline:
+            return line
+
+        (indentation, imports) = re.split(pattern=r'\bimport\b',
+                                          string=line, maxsplit=1)
+
+        indentation += 'import '
+        assert newline
+
+        return ''.join([indentation + i.strip() + newline
+                        for i in sorted(imports.split(','))])
+
+
+    def filter_code(self, source):
+        """Yield code with unused imports removed."""
+        messages = check(source)
+
+        marked_import_line_numbers = frozenset(
+            unused_import_line_numbers(messages))
+
+        if self.remove_unused_variables:
+            marked_variable_line_numbers = frozenset(
+                unused_variable_line_numbers(messages))
+        else:
+            marked_variable_line_numbers = {}
+
+        sio = io.StringIO(source)
+        previous_line = ''
+        for line_number, line in enumerate(sio.readlines(), start=1):
+            if '#' in line:
+                yield line
+            elif line_number in marked_import_line_numbers:
+                yield self.filter_unused_import(
+                    line,
+                    previous_line=previous_line)
+            elif line_number in marked_variable_line_numbers:
+                yield self.filter_unused_variable(line)
+            else:
+                yield line
+
+            previous_line = line
+
+
+    def filter_unused_import(self, line, previous_line=''):
+        """Return line if used, otherwise return None."""
+        if multiline_import(line, previous_line):
+            return line
+        elif ',' in line:
+            return self.break_up_import(line)
+        else:
+            package = extract_package_name(line)
+            if not self.remove_all_unused_imports and package not in self.imports:
+                return line
+            else:
+                # We need to replace import with "pass" in case the import is the
+                # only line inside a block. For example,
+                # "if True:\n    import os". In such cases, if the import is
+                # removed, the block will be left hanging with no body.
+                return (get_indentation(line) +
+                        'pass' +
+                        get_line_ending(line))
+
+
+    def filter_unused_variable(self, line, previous_line=''):
+        """Return line if used, otherwise return None."""
+        if re.match(EXCEPT_REGEX, line):
+            return re.sub(r' as \w+:$', ':', line, count=1)
+        elif multiline_statement(line, previous_line):
+            return line
+        elif line.count('=') == 1:
+            split_line = line.split('=')
+            assert len(split_line) == 2
+            value = split_line[1].lstrip()
+            if ',' in split_line[0]:
+                return line
+
+            if is_literal_or_name(value):
+                # Replace with "pass" to avoid possible hanging block with no body.
+                value = 'pass' + get_line_ending(line)
+
+            return get_indentation(line) + value
+        else:
+            return line
+
+
+
+
+    def useless_pass_line_numbers(self, source):
+        """Yield line numbers of unneeded "pass" statements."""
+        sio = io.StringIO(source)
+        previous_token_type = None
+        last_pass_row = None
+        last_pass_indentation = None
+        previous_line = ''
+        for token in tokenize.generate_tokens(sio.readline):
+            token_type = token[0]
+            start_row = token[2][0]
+            line = token[4]
+
+            is_pass = (token_type == tokenize.NAME and line.strip() == 'pass')
+
+            # Leading "pass".
+            if (start_row - 1 == last_pass_row and
+                get_indentation(line) == last_pass_indentation and
+                token_type in ATOMS and
+                not is_pass):
+                yield start_row - 1
+
+            if is_pass:
+                last_pass_row = start_row
+                last_pass_indentation = get_indentation(line)
+
+            # Trailing "pass".
+            if (is_pass and
+                previous_token_type != tokenize.INDENT and
+                not previous_line.rstrip().endswith('\\')):
+                yield start_row
+
+            previous_token_type = token_type
+            previous_line = line
+
+
+    def filter_useless_pass(self, source):
+        """Yield code with useless "pass" lines removed."""
+        try:
+            marked_lines = frozenset(self.useless_pass_line_numbers(source))
+        except (SyntaxError, tokenize.TokenError):
+            marked_lines = frozenset()
+
+        sio = io.StringIO(source)
+        for line_number, line in enumerate(sio.readlines(), start=1):
+            if line_number not in marked_lines:
+                yield line
+
+
+
+
+
+    def fix_code(self, source):
+        """Return code with all filtering run on it."""
+        if not source:
+            return source
+
+        # pyflakes does not handle "nonlocal" correctly.
+        if 'nonlocal' in source:
+            self.remove_unused_variables = False
+
+        filtered_source = None
+        while True:
+            filtered_source = ''.join(
+                self.filter_useless_pass(''.join(
+                    self.filter_code(source,))))
+
+            if filtered_source == source:
+                break
+            source = filtered_source
+
+        return filtered_source
+
+
+    def fix_file(self, filename, args, standard_out):
+        """Run fix_code() on a file."""
+        encoding = detect_encoding(filename)
+        with open_with_encoding(filename, encoding=encoding) as input_file:
+            source = input_file.read()
+
+        original_source = source
+
+        filtered_source = self.fix_code(source)
+
+        if original_source != filtered_source:
+            if args.in_place:
+                with open_with_encoding(filename, mode='w',
+                                        encoding=encoding) as output_file:
+                    output_file.write(filtered_source)
+            else:
+                diff = get_diff_text(
+                    io.StringIO(original_source).readlines(),
+                    io.StringIO(filtered_source).readlines(),
+                    filename)
+                standard_out.write(''.join(diff))
+
+
+
+
+
+
 def _main(argv, standard_out, standard_error):
     """Return exit status.
 
@@ -521,6 +521,11 @@ def _main(argv, standard_out, standard_error):
               file=standard_error)
         return 1
 
+
+    autoflake = AutoFlake(additional_imports=args.imports.split(',') if args.imports else None,
+                          remove_all_unused_imports=args.remove_all_unused_imports,
+                          remove_unused_variables=args.remove_unused_variables)
+
     filenames = list(set(args.files))
     while filenames:
         name = filenames.pop(0)
@@ -533,7 +538,7 @@ def _main(argv, standard_out, standard_error):
                                   if not d.startswith('.')]
         else:
             try:
-                fix_file(name, args=args, standard_out=standard_out)
+                autoflake.fix_file(name, args=args, standard_out=standard_out)
             except IOError as exception:
                 print(unicode(exception), file=standard_error)
 
